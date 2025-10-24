@@ -1,13 +1,14 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ChevronLeftIcon } from "@heroicons/react/24/solid";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { db } from "@/lib/firebase";
-import { addDoc, collection, doc, DocumentReference, getDocs, limit, orderBy, query, serverTimestamp, where, DocumentData } from "firebase/firestore";
-import { getStoredUser } from "@/services/appAuth";
+import { addDoc, collection, doc, getDocs, limit, orderBy, query, serverTimestamp, where, type DocumentReference, type DocumentData } from "firebase/firestore";
+import { getStoredUser, type AppUser } from "@/services/appAuth";
 import useMqttTelemetry from "@/hooks/useMqttTelemetry";
 import { sendStopMeasurement } from "@/services/mqttCommands";
 
@@ -17,26 +18,22 @@ type SensorState = {
   moisture: number | null;
 };
 
-function normalizeDeviceId(di: unknown): string | null {
-  // /devices/PAMITS002   → "PAMITS002"
-  if (typeof di === "string") {
-    const parts = di.split("/");
-    return parts.pop() || null;
-  }
-  // DocumentReference     → ref.id  ("PAMITS002")
-  if (di && typeof di === "object" && (di as DocumentReference<DocumentData>).id) {
-    return (di as DocumentReference<DocumentData>).id ?? null;
-  }
-  return null;
-}
+type LiveTelemetry = {
+  FFA?: number;
+  Carotine?: number;
+  Moisture?: number;
+  result?: boolean;
+} | null;
 
 export default function MeasurementDetailPage() {
   const router = useRouter();
-  const user = getStoredUser();
-  const deviceId: string | null = normalizeDeviceId((user as any)?.deviceId ?? (user as any)?.device_id);
+  const user: AppUser | null = getStoredUser();
+
+  // AppUser.deviceId sudah bertipe string | null
+  const deviceId: string | null = user?.deviceId ?? null;
 
   // LIVE telemetry dari MQTT
-  const live = useMqttTelemetry(deviceId);
+  const live: LiveTelemetry = useMqttTelemetry(deviceId);
 
   const [processing, setProcessing] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
@@ -53,12 +50,12 @@ export default function MeasurementDetailPage() {
   /** Sinkronkan tampilan angka dengan data live dari MQTT */
   useEffect(() => {
     if (!live) return;
-    setSensor({
-      ffa: typeof live.FFA === "number" ? live.FFA : sensor.ffa,
-      carotine: typeof live.Carotine === "number" ? live.Carotine : sensor.carotine,
-      moisture: typeof live.Moisture === "number" ? live.Moisture : sensor.moisture,
-    });
-  }, [live]); // eslint-disable-line react-hooks/exhaustive-deps
+    setSensor((prev) => ({
+      ffa: typeof live.FFA === "number" ? live.FFA : prev.ffa,
+      carotine: typeof live.Carotine === "number" ? live.Carotine : prev.carotine,
+      moisture: typeof live.Moisture === "number" ? live.Moisture : prev.moisture,
+    }));
+  }, [live]);
 
   /** Tentukan hasil (opsional) dari live.result bila ada */
   useEffect(() => {
@@ -68,7 +65,7 @@ export default function MeasurementDetailPage() {
   }, [live?.result, analyzed]);
 
   /** Ambil next measurment_id (berdasar user & terbesar saat ini + 1) */
-  const getNextId = useCallback(async (userRef: DocumentReference) => {
+  const getNextId = useCallback(async (userRef: DocumentReference<DocumentData>) => {
     const qLatest = query(collection(db, "measurments"), where("user_id", "==", userRef), orderBy("measurment_id", "desc"), limit(1));
     const snap = await getDocs(qLatest);
     if (snap.empty) return 1;
@@ -83,11 +80,11 @@ export default function MeasurementDetailPage() {
     // TODO: ganti dengan inferensi model ML kamu
     await new Promise((r) => setTimeout(r, 900));
 
-    // aktifkan mode analyzed; result akan mengikuti live.result (jika ada)
     setAnalyzed(true);
-    // fallback jika live.result belum ada → tentukan dari angka (opsional)
-    if (result === null && live) {
-      const good = typeof live.result === "boolean" ? live.result : true;
+
+    // fallback jika live.result belum ada → tentukan default
+    if (result === null) {
+      const good = typeof live?.result === "boolean" ? live.result : true;
       setResult(good ? "Good" : "Poor");
     }
 
@@ -99,13 +96,14 @@ export default function MeasurementDetailPage() {
     if (deviceId) {
       try {
         await sendStopMeasurement(deviceId);
-      } catch {}
+      } catch {
+        // no-op
+      }
     }
     router.replace(toast ? `/home?toast=${encodeURIComponent(toast)}` : "/home");
   }
 
   const handleSave = async (save: boolean) => {
-    // jika user pilih "No": hentikan measurement & balik tanpa simpan
     if (!save) {
       await stopAndBack("cancelled");
       return;
@@ -117,8 +115,8 @@ export default function MeasurementDetailPage() {
     }
 
     try {
-      const userRef = doc(db, "users", user.id);
-      const deviceRef = doc(db, "devices", deviceId);
+      const userRef = doc(db, "users", user.id) as DocumentReference<DocumentData>;
+      const deviceRef = doc(db, "devices", deviceId) as DocumentReference<DocumentData>;
 
       const nextId = await getNextId(userRef);
 
@@ -197,7 +195,7 @@ export default function MeasurementDetailPage() {
                 ${analyzed ? "bg-lime-400 ring-black" : "bg-zinc-400 ring-zinc-600"}
                 hover:brightness-105 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed`}
             >
-              <img src="/analyze.svg" alt="" className={`w-5 h-5 ${processing ? "animate-pulse" : ""}`} />
+              <Image src="/analyze.svg" alt="" height={32} width={32} className={`w-5 h-5 ${processing ? "animate-pulse" : ""}`} />
             </button>
           </div>
 

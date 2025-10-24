@@ -5,25 +5,17 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { HomeIcon, UserIcon, PlusCircleIcon } from "@heroicons/react/24/solid";
 import { db } from "@/lib/firebase";
-import { doc, onSnapshot, DocumentReference, DocumentData } from "firebase/firestore";
-import { getStoredUser } from "@/services/appAuth";
+import { doc, onSnapshot } from "firebase/firestore";
+import { getStoredUser, normalizeDeviceId, type AppUser } from "@/services/appAuth";
 import { sendStartMeasurement } from "@/services/mqttCommands";
 
-function normalizeDeviceId(di: unknown): string | null {
-  if (di && typeof di === "object" && (di as DocumentReference).id) {
-    return (di as DocumentReference<DocumentData>).id;
-  }
-  if (typeof di === "string") {
-    const parts = di.split("/");
-    return parts.pop() || null;
-  }
-  return null;
-}
+type DeviceDoc = { status?: boolean | null };
 
 export default function BottomNav() {
   const router = useRouter();
-  const u = getStoredUser();
-  const deviceId = u?.deviceId ?? normalizeDeviceId((u as any)?.device_id);
+
+  const cached: AppUser | null = getStoredUser();
+  const deviceId = normalizeDeviceId(cached?.deviceId ?? null) ?? null;
 
   const [connected, setConnected] = useState<boolean | null>(null);
   const [sending, setSending] = useState(false);
@@ -34,25 +26,28 @@ export default function BottomNav() {
       return;
     }
     const unsub = onSnapshot(doc(db, "devices", deviceId), (snap) => {
-      const ok = snap.exists() && typeof snap.data().status === "boolean" ? (snap.data().status as boolean) : false;
-      setConnected(ok);
+      if (!snap.exists()) {
+        setConnected(false);
+        return;
+      }
+      const data = snap.data() as DeviceDoc;
+      setConnected(data.status === true);
     });
     return () => unsub();
   }, [deviceId]);
 
-  const disableMeasure = !deviceId || connected !== true || sending;
+  const disabled = !deviceId || connected !== true || sending;
 
   const onMeasureClick = async () => {
-    if (disableMeasure) return;
+    if (disabled || !deviceId) return;
     try {
       setSending(true);
-      await sendStartMeasurement(deviceId!); // minta ESP32 mulai kirim telemetry
+      await sendStartMeasurement(deviceId);
     } catch (e) {
-      console.error("start_measurement error:", e);
-      // opsional: tampilkan toast
+      console.error("error measurment...", e);
     } finally {
       setSending(false);
-      router.push("/measure"); // pindah ke page measurement
+      router.push("/measure");
     }
   };
 
@@ -63,17 +58,16 @@ export default function BottomNav() {
           <HomeIcon className="size-6" />
         </Link>
 
-        {/* Tombol Measurement: disabled jika device disconnect / belum siap */}
         <button
           type="button"
           onClick={onMeasureClick}
-          disabled={disableMeasure}
-          aria-disabled={disableMeasure}
+          disabled={disabled}
+          aria-disabled={disabled}
           title={!deviceId ? "No device" : connected === null ? "Checking device…" : connected ? "Start measurement" : "Device disconnected"}
           className={`p-1 rounded-full ring-2 grid place-items-center transition
-            ${disableMeasure ? "bg-zinc-600 ring-zinc-400 cursor-not-allowed" : "bg-lime-400 ring-black hover:brightness-105 active:scale-95"}`}
+            ${disabled ? "bg-zinc-600 ring-zinc-400 cursor-not-allowed" : "bg-lime-400 ring-black hover:brightness-105 active:scale-95"}`}
         >
-          <PlusCircleIcon className={`size-8 ${disableMeasure ? "text-zinc-300" : "text-black"}`} />
+          <PlusCircleIcon className={`size-8 ${disabled ? "text-zinc-300" : "text-black"}`} />
         </button>
 
         <Link href="/profile" aria-label="Profile" className="p-2">

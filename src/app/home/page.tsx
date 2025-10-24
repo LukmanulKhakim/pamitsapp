@@ -1,6 +1,7 @@
 // src/app/home/page.tsx
 "use client";
 
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Toast from "@/app/components/Toast";
 import RequireAuth from "@/app/components/RequireAuth";
@@ -10,7 +11,7 @@ import StatusCard from "@/app/components/StatusCard";
 import MeasurementHistory from "@/app/components/MeasurmentHistory";
 import MqttBridge from "@/app/components/MqttBridge";
 
-export default function HomePage() {
+function HomePage() {
   const params = useSearchParams();
   const toast = params.get("toast"); // "saved" | "cancelled" | "error" | null
 
@@ -31,5 +32,13 @@ export default function HomePage() {
       <MqttBridge />
       {toastText && <Toast text={toastText} />}
     </RequireAuth>
+  );
+}
+
+export default function Page() {
+  return (
+    <Suspense fallback={null}>
+      <HomePage />
+    </Suspense>
   );
 }

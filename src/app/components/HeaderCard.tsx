@@ -1,9 +1,18 @@
+// src/app/components/HeaderCard.tsx
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState } from "react";
-import { getStoredUser, type AppUser } from "@/services/appAuth";
+import { getStoredUser, type AppUser, normalizeDeviceId } from "@/services/appAuth";
 import { db } from "@/lib/firebase";
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, onSnapshot, type DocumentReference, type DocumentData } from "firebase/firestore";
+
+type UserDoc = {
+  nama?: string | null;
+  phone?: string | null;
+  company?: string | null;
+  device_id?: string | DocumentReference<DocumentData> | null;
+};
 
 export default function HeaderCard() {
   const [user, setUser] = useState<AppUser | null>(null);
@@ -12,21 +21,22 @@ export default function HeaderCard() {
     const cached = getStoredUser();
     if (!cached?.id) return;
 
-    // set dari cache dulu biar cepet
     setUser(cached);
 
-    // listen dokumen user di Firestore → auto update saat nama berubah
     const unsub = onSnapshot(doc(db, "users", cached.id), (snap) => {
-      if (snap.exists()) {
-        const data = snap.data() as any;
-        setUser((prev) => ({
+      if (!snap.exists()) return;
+      const data = snap.data() as UserDoc;
+
+      setUser((prev) => {
+        const prevSafe: AppUser = prev ?? { id: snap.id };
+        return {
           id: snap.id,
-          nama: data.nama ?? prev?.nama ?? "Guest",
-          phone: data.phone ?? prev?.phone,
-          company: data.company ?? prev?.company,
-          device_id: data.device_id ?? prev?.deviceId,
-        }));
-      }
+          nama: typeof data.nama === "string" ? data.nama : prevSafe.nama,
+          phone: typeof data.phone === "string" ? data.phone : prevSafe.phone,
+          company: typeof data.company === "string" || data.company === null ? data.company : prevSafe.company ?? null,
+          deviceId: normalizeDeviceId(data.device_id) ?? prevSafe.deviceId ?? null,
+        };
+      });
     });
 
     return () => unsub();
@@ -38,7 +48,7 @@ export default function HeaderCard() {
         <p className="text-xs text-zinc-400">Hallo 👋</p>
         <h1 className="text-lg font-bold">{user?.nama ?? "Guest"}</h1>
       </div>
-      <img src="/avatar.png" alt="User avatar" className="w-8 h-8 rounded-full border border-zinc-600 object-cover" />
+      <Image src="/avatar.png" alt="User avatar" width={32} height={32} className="w-8 h-8 rounded-full border border-zinc-600 object-cover" priority />
     </div>
   );
 }

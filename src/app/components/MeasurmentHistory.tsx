@@ -2,14 +2,22 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { db } from "@/lib/firebase";
-import { collection, query, where, orderBy, onSnapshot, Timestamp, DocumentReference, doc } from "firebase/firestore";
-import { getStoredUser } from "@/services/appAuth";
+import { collection, query, where, orderBy, onSnapshot, Timestamp, doc, type DocumentReference, type DocumentData } from "firebase/firestore";
+import { getStoredUser, type AppUser } from "@/services/appAuth";
 
 type Row = {
   id: string;
   measurment_id: number;
   created_at: Date;
   result_analyze: boolean;
+};
+
+type MeasDoc = {
+  measurment_id?: number;
+  created_at?: Timestamp;
+  result_analyze?: boolean;
+  user_id?: DocumentReference<DocumentData>;
+  device_id?: DocumentReference<DocumentData>;
 };
 
 function startEndOfDay(d: Date) {
@@ -37,21 +45,20 @@ export default function MeasurementHistory({
   year?: number;
   month?: number;
 }) {
-  const today = new Date();
+  const today = useMemo(() => new Date(), []);
   const yr = year ?? today.getFullYear();
   const mo = month ?? today.getMonth() + 1; // 1..12
   const mIdx = mo - 1; // 0..11
 
-  // container untuk bar tanggal (agar bisa auto-scroll ke tanggal terpilih)
+  // container untuk bar tanggal
   const barRef = useRef<HTMLDivElement | null>(null);
 
-  // selected day: disetel setelah mount/ketika bulan berubah → hari ini (jika bulan ini) atau 1
+  // selected day
   const [selectedDay, setSelectedDay] = useState<number>(1);
   useEffect(() => {
     const inThisMonth = today.getFullYear() === yr && today.getMonth() === mIdx;
-    const d = inThisMonth ? today.getDate() : 1;
-    setSelectedDay(d);
-  }, [yr, mIdx]);
+    setSelectedDay(inThisMonth ? today.getDate() : 1);
+  }, [yr, mIdx, today]);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
@@ -64,15 +71,15 @@ export default function MeasurementHistory({
     return Array.from({ length: n }, (_, i) => i + 1);
   }, [yr, mIdx]);
 
-  // Auto-scroll tanggal terpilih agar terlihat
+  // Auto-scroll
   useEffect(() => {
     const el = barRef.current?.querySelector<HTMLButtonElement>(`button[data-day="${selectedDay}"]`);
     el?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
   }, [selectedDay]);
 
-  // Query Firestore realtime untuk hari terpilih & user yang login
+  // Query Firestore realtime
   useEffect(() => {
-    const user = getStoredUser();
+    const user: AppUser | null = getStoredUser();
     if (!user?.id) {
       setRows([]);
       setLoading(false);
@@ -82,38 +89,33 @@ export default function MeasurementHistory({
     setLoading(true);
     setPermError(null);
 
-    const userRef = doc(db, "users", user.id) as DocumentReference;
+    const userRef = doc(db, "users", user.id) as DocumentReference<DocumentData>;
 
     const day = new Date(yr, mIdx, selectedDay);
     const { start, end } = startEndOfDay(day);
 
-    const q = query(
-      collection(db, "measurments"), // pastikan ejaan koleksi sesuai DB
-      where("user_id", "==", userRef),
-      where("created_at", ">=", Timestamp.fromDate(start)),
-      where("created_at", "<", Timestamp.fromDate(end)),
-      orderBy("created_at", "desc")
-    );
+    const q = query(collection(db, "measurments"), where("user_id", "==", userRef), where("created_at", ">=", Timestamp.fromDate(start)), where("created_at", "<", Timestamp.fromDate(end)), orderBy("created_at", "desc"));
 
     const unsub = onSnapshot(
       q,
       (snap) => {
         const r: Row[] = snap.docs.map((d) => {
-          const data: any = d.data();
-          const ts: Timestamp = data.created_at;
+          const data = d.data() as MeasDoc;
+          const ts = data.created_at;
           return {
             id: d.id,
             measurment_id: Number(data.measurment_id ?? 0),
-            created_at: ts?.toDate?.() ?? new Date(),
-            result_analyze: !!data.result_analyze,
+            created_at: ts instanceof Timestamp ? ts.toDate() : new Date(),
+            result_analyze: data.result_analyze === true,
           };
         });
         setRows(r);
         setLoading(false);
       },
-      (err) => {
+      (err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Query error";
         console.error("measurments query error:", err);
-        setPermError(err?.message ?? "Query error");
+        setPermError(msg);
         setRows([]);
         setLoading(false);
       }
@@ -137,7 +139,13 @@ export default function MeasurementHistory({
             {dayList.map((d) => {
               const active = d === selectedDay;
               return (
-                <button key={d} data-day={d} onClick={() => setSelectedDay(d)} className={`px-2 pb-1 text-sm border-b-2 transition ${active ? "border-lime-400 text-black" : "border-transparent text-zinc-500"}`}>
+                <button
+                  key={d}
+                  data-day={d}
+                  onClick={() => setSelectedDay(d)}
+                  className={`px-2 pb-1 text-sm border-b-2 transition
+                    ${active ? "border-lime-400 text-black" : "border-transparent text-zinc-500"}`}
+                >
                   {d}
                 </button>
               );

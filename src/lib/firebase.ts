@@ -13,7 +13,6 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
 };
 
-// Hindari re-init saat HMR
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // Export singletons

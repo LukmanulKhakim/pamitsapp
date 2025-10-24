@@ -1,15 +1,16 @@
 "use client";
 
+import { Suspense } from "react";
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PhoneIcon, LockClosedIcon, EyeIcon, EyeSlashIcon, ChevronDoubleRightIcon } from "@heroicons/react/24/solid";
 import { signInPhonePassword, getStoredUser } from "@/services/appAuth";
 
-export default function LoginPage() {
+/** Komponen dalam yang pakai useSearchParams */
+function LoginInner() {
   const router = useRouter();
   const params = useSearchParams();
-
-  // default ke /home; tetap hormati ?next=...
   const next = params.get("next") || "/home";
 
   const [phone, setPhone] = useState("");
@@ -18,7 +19,6 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // kalau sudah login → langsung ke next (/home)
   useEffect(() => {
     const user = getStoredUser();
     if (user) router.replace(next);
@@ -26,23 +26,14 @@ export default function LoginPage() {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loading) return;
-
     setErr(null);
-
-    // validasi sederhana
-    const phoneTrim = phone.trim();
-    const passTrim = password.trim();
-    if (!phoneTrim) return setErr("Phone wajib diisi.");
-    if (passTrim.length < 4) return setErr("Password minimal 4 karakter.");
-
     setLoading(true);
     try {
-      await signInPhonePassword(phoneTrim, passTrim);
+      await signInPhonePassword(phone.trim(), password);
       router.replace(next);
-    } catch (e: any) {
-      console.error(e);
-      setErr(e?.message || "Login gagal");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Login gagal");
+    } finally {
       setLoading(false);
     }
   };
@@ -56,7 +47,7 @@ export default function LoginPage() {
           <div className="absolute inset-0 bg-gradient-to-b from-black/60 to-black/20" />
           <div className="relative z-10 p-5">
             <div className="flex items-center gap-2">
-              <img src="/pamitslogo.png" alt="Pamits" className="h-6 w-auto" />
+              <Image src="/pamitslogo.png" alt="Pamits" width={96} height={24} className="h-6 w-auto" priority />
             </div>
             <h1 className="mt-4 text-2xl font-extrabold leading-snug">
               Get started and set up your <span className="text-lime-400">account</span> now!
@@ -67,7 +58,6 @@ export default function LoginPage() {
         {/* FORM */}
         <section className="-mx-4 mt-3 rounded-t-[24px] bg-white text-black p-4">
           <form onSubmit={onSubmit} className="space-y-4">
-            {/* Phone */}
             <div>
               <label className="block text-sm text-zinc-600 mb-1">Your Phone</label>
               <div className="relative">
@@ -81,12 +71,10 @@ export default function LoginPage() {
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
                   className="w-full rounded-full border border-zinc-300 pl-10 pr-4 py-3 outline-none focus:ring-2 focus:ring-lime-400"
-                  autoComplete="tel"
                 />
               </div>
             </div>
 
-            {/* Password */}
             <div>
               <label className="block text-sm text-zinc-600 mb-1">Choose a password</label>
               <div className="relative">
@@ -99,7 +87,6 @@ export default function LoginPage() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full rounded-full border border-zinc-300 pl-10 pr-12 py-3 outline-none focus:ring-2 focus:ring-lime-400"
-                  autoComplete="current-password"
                 />
                 <button type="button" onClick={() => setShowPass((v) => !v)} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-700" aria-label={showPass ? "Hide password" : "Show password"}>
                   {showPass ? <EyeSlashIcon className="w-5 h-5" /> : <EyeIcon className="w-5 h-5" />}
@@ -132,5 +119,13 @@ export default function LoginPage() {
         </section>
       </div>
     </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <Suspense fallback={null}>
+      <LoginInner />
+    </Suspense>
   );
 }

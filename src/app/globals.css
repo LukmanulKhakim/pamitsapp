@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+body {
+  @apply bg-black text-white font-sans;
+}
+
+/* opsional: sembunyikan scrollbar di WebKit */
+::-webkit-scrollbar {
+  display: none;
+}

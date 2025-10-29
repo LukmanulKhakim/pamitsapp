@@ -7,29 +7,91 @@ import { ChevronLeftIcon } from "@heroicons/react/24/solid";
 import { useCallback, useEffect, useState } from "react";
 
 import { db } from "@/lib/firebase";
-import { addDoc, collection, doc, getDocs, limit, orderBy, query, serverTimestamp, where, type DocumentReference, type DocumentData } from "firebase/firestore";
+import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, where, type DocumentReference, type DocumentData } from "firebase/firestore";
 import { getStoredUser, type AppUser } from "@/services/appAuth";
 import useMqttTelemetry from "@/hooks/useMqttTelemetry";
 import { sendStopMeasurement } from "@/services/mqttCommands";
 
+/** ===== Types (moisture diabaikan) ===== */
 type SensorState = {
-  ffa: number | null;
-  carotine: number | null;
-  moisture: number | null;
+  turbidity: number | null;
+  r: number | null;
+  g: number | null;
+  b: number | null;
 };
 
 type LiveTelemetry = {
-  FFA?: number;
-  Carotine?: number;
-  Moisture?: number;
-  result?: boolean;
+  Turbidity?: number;
+  R?: number;
+  G?: number;
+  B?: number;
+  result?: boolean; // opsional dari device
 } | null;
 
+// ===== Types & defaults =====
+type CpoThresholds = {
+  /** Volt minimum agar dianggap GOOD. Jika Turbidity < nilai ini → BAD */
+  turbidity_min_good_v: number;
+  /** Batas bawah rasio warna R/(R+G+B); jika di bawah ini → BAD */
+  r_ratio_min: number;
+};
+
+const FALLBACK_THRESHOLDS: CpoThresholds = {
+  turbidity_min_good_v: 1.0, // sesuai dataset kamu: <1 BAD, ≥1 GOOD
+  r_ratio_min: 0.35, // tetap dipakai
+};
+
+// ===== Fetch thresholds dari Firestore (configs/cpo_thresholds) =====
+async function fetchThresholdsFromFirestore(): Promise<CpoThresholds | null> {
+  try {
+    const ref = doc(db, "configs", "cpo_thresholds") as DocumentReference<DocumentData>;
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const d = snap.data() as any;
+
+      // backward compat: jika dulu ada turbidity_max_v, pakai sebagai min_good
+      const minGood = d.turbidity_min_good_v !== undefined ? Number(d.turbidity_min_good_v) : d.turbidity_max_v !== undefined ? Number(d.turbidity_max_v) : FALLBACK_THRESHOLDS.turbidity_min_good_v;
+
+      return {
+        turbidity_min_good_v: minGood,
+        r_ratio_min: Number(d.r_ratio_min ?? FALLBACK_THRESHOLDS.r_ratio_min),
+      };
+    }
+  } catch {
+    // fallback akan dipakai
+  }
+  return null;
+}
+
+// ===== Classifier: dua aturan aktif =====
+function classifyCPO(s: { R: number; G: number; B: number; Turbidity: number }, t: CpoThresholds): { label: "Good" | "Bad"; y: 0 | 1; result_analyze: boolean; r_ratio: number } {
+  const R = Number(s.R) || 0;
+  const G = Number(s.G) || 0;
+  const B = Number(s.B) || 0;
+  const T = Number(s.Turbidity) || 0;
+
+  // r_ratio dengan guard zero-division
+  const sum = Math.max(R + G + B, Number.EPSILON);
+  const r_ratio = R / sum;
+
+  let isBad = false;
+
+  // ✅ Aturan turbidity utama
+  if (T < t.turbidity_min_good_v) isBad = true;
+
+  // ✅ Aturan warna tetap dipakai
+  if (r_ratio < t.r_ratio_min) isBad = true;
+
+  const label: "Good" | "Bad" = isBad ? "Bad" : "Good";
+  const y: 0 | 1 = isBad ? 1 : 0; // 0=Good, 1=Bad (sesuai dataset)
+  const result_analyze = !isBad; // Good → true, Bad → false
+  return { label, y, result_analyze, r_ratio };
+}
+
+/** ===== Komponen Halaman ===== */
 export default function MeasurementDetailPage() {
   const router = useRouter();
   const user: AppUser | null = getStoredUser();
-
-  // AppUser.deviceId sudah bertipe string | null
   const deviceId: string | null = user?.deviceId ?? null;
 
   // LIVE telemetry dari MQTT
@@ -37,30 +99,36 @@ export default function MeasurementDetailPage() {
 
   const [processing, setProcessing] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
-  const [result, setResult] = useState<"Good" | "Poor" | null>(null);
+  const [result, setResult] = useState<"Good" | "Bad" | null>(null);
   const [askSave, setAskSave] = useState(false);
 
-  // buffer tampilan (ditarik dari live)
+  // buffer tampilan (tanpa moisture)
   const [sensor, setSensor] = useState<SensorState>({
-    ffa: null,
-    carotine: null,
-    moisture: null,
+    turbidity: null,
+    r: null,
+    g: null,
+    b: null,
   });
+
+  // simpan info tambahan untuk audit (opsional)
+  const [usedThresholds, setUsedThresholds] = useState<CpoThresholds | null>(null);
+  const [lastRRatio, setLastRRatio] = useState<number | null>(null);
 
   /** Sinkronkan tampilan angka dengan data live dari MQTT */
   useEffect(() => {
     if (!live) return;
     setSensor((prev) => ({
-      ffa: typeof live.FFA === "number" ? live.FFA : prev.ffa,
-      carotine: typeof live.Carotine === "number" ? live.Carotine : prev.carotine,
-      moisture: typeof live.Moisture === "number" ? live.Moisture : prev.moisture,
+      turbidity: typeof live.Turbidity === "number" ? live.Turbidity : prev.turbidity,
+      r: typeof live.R === "number" ? live.R : prev.r,
+      g: typeof live.G === "number" ? live.G : prev.g,
+      b: typeof live.B === "number" ? live.B : prev.b,
     }));
   }, [live]);
 
-  /** Tentukan hasil (opsional) dari live.result bila ada */
+  /** Jika device kirim live.result dan sudah dianalisis manual, ikutkan sebagai override opsional */
   useEffect(() => {
     if (typeof live?.result === "boolean" && analyzed) {
-      setResult(live.result ? "Good" : "Poor");
+      setResult(live.result ? "Good" : "Bad");
     }
   }, [live?.result, analyzed]);
 
@@ -77,19 +145,28 @@ export default function MeasurementDetailPage() {
     if (processing) return;
     setProcessing(true);
 
-    // TODO: ganti dengan inferensi model ML kamu
-    await new Promise((r) => setTimeout(r, 900));
+    try {
+      const R = sensor.r ?? 0;
+      const G = sensor.g ?? 0;
+      const B = sensor.b ?? 0;
+      const Turbidity = sensor.turbidity ?? 0;
 
-    setAnalyzed(true);
+      // Ambil ambang dari Firestore, kalau tidak ada pakai fallback
+      const t = (await fetchThresholdsFromFirestore()) ?? FALLBACK_THRESHOLDS;
+      setUsedThresholds(t);
 
-    // fallback jika live.result belum ada → tentukan default
-    if (result === null) {
-      const good = typeof live?.result === "boolean" ? live.result : true;
-      setResult(good ? "Good" : "Poor");
+      // Klasifikasi sederhana
+      const { label, r_ratio } = classifyCPO({ R, G, B, Turbidity }, t);
+      setLastRRatio(r_ratio);
+
+      setAnalyzed(true);
+      setResult(label);
+      setAskSave(true);
+    } catch (e) {
+      console.error("analyze error:", e);
+    } finally {
+      setProcessing(false);
     }
-
-    setProcessing(false);
-    setAskSave(true);
   };
 
   async function stopAndBack(toast?: string) {
@@ -120,20 +197,36 @@ export default function MeasurementDetailPage() {
 
       const nextId = await getNextId(userRef);
 
-      // bentuk dokumen sesuai skema kamu
+      // Hitung ulang label numerik agar konsisten
+      const R = sensor.r ?? 0;
+      const G = sensor.g ?? 0;
+      const B = sensor.b ?? 0;
+      const Turbidity = sensor.turbidity ?? 0;
+      const t = usedThresholds ?? FALLBACK_THRESHOLDS;
+      const { y, r_ratio } = classifyCPO({ R, G, B, Turbidity }, t);
+
+      // Bentuk dokumen sesuai skema kamu
       const payload = {
         analyze: analyzed, // true jika tombol Analyze pernah diklik
         created_at: serverTimestamp(),
         time: serverTimestamp(),
         measurment_id: nextId,
-        result_analyze: result === "Good", // boolean
+
+        // Hasil analisis (Good → true, Bad → false)
+        result_analyze: (result ?? (y === 0 ? "Good" : "Bad")) === "Good",
+        result_label: y, // 0=Good, 1=Bad (sesuai dataset)
+        debug_rratio: r_ratio, // opsional untuk audit
+
         sensor_data: [
           {
-            Carotine: sensor.carotine ?? 0,
-            FFA: sensor.ffa ?? 0,
-            Moisture: sensor.moisture ?? 0,
+            Turbidity: Turbidity,
+            R: R,
+            G: G,
+            B: B,
           },
         ],
+
+        thresholds_used: t, // opsional: simpan jejak ambang yang dipakai
         user_id: userRef, // reference
         device_id: deviceRef, // reference
       };
@@ -160,7 +253,7 @@ export default function MeasurementDetailPage() {
             </span>
             <span>Back</span>
           </Link>
-          <h1 className="mt-2 text-xl font-semibold">Measurement Detail</h1>
+          <h1 className="mt-2 text-xl font-semibold">Measurment Detail</h1>
         </div>
 
         {/* PANEL PUTIH */}
@@ -169,20 +262,25 @@ export default function MeasurementDetailPage() {
           <div>
             <div className="text-sm font-semibold mb-3">Data Sensor</div>
 
+            {/* Turbidity */}
             <div className="grid grid-cols-[1fr_auto] gap-y-3 items-center">
-              <span className="text-sm text-zinc-700">FFA</span>
-              <CapsuleValue value={sensor.ffa} unit="%" placeholder="—" />
+              <span className="text-sm text-zinc-700">Turbidity</span>
+              <CapsuleValue value={sensor.turbidity} unit="V" placeholder="—" />
+            </div>
 
-              <span className="text-sm text-zinc-700">Carotine</span>
-              <CapsuleValue value={sensor.carotine} unit="ppm" placeholder="—" />
-
-              <span className="text-sm text-zinc-700">Moisture</span>
-              <CapsuleValue value={sensor.moisture} unit="%" placeholder="—" />
+            {/* Color Parameter: R G B */}
+            <div className="mt-6">
+              <span className="block text-sm text-zinc-700 mb-4 md:mb-5">Color Parameter</span>
+              <div className="grid grid-cols-3 gap-3 md:gap-4 max-w-xs">
+                <MiniCapsule label="R" value={sensor.r} />
+                <MiniCapsule label="G" value={sensor.g} />
+                <MiniCapsule label="B" value={sensor.b} />
+              </div>
             </div>
           </div>
 
-          {/* Kapsul Analyze (abu-abu jika belum diklik) + tombol kanan */}
-          <div className={`relative w-full h-12 md:h-14 rounded-full shadow mt-5 ${analyzeCapsuleClass}`}>
+          {/* Kapsul Analyze */}
+          <div className={`relative w-full h-12 md:h-14 rounded-full shadow mt-8 md:mt-10 ${analyzeCapsuleClass}`}>
             <span className="absolute inset-0 grid place-items-center text-base font-medium select-none">{processing ? "Processing…" : "Analyze"}</span>
             <button
               onClick={handleAnalyze}
@@ -202,7 +300,7 @@ export default function MeasurementDetailPage() {
           {/* Hasil */}
           <div
             className={`mt-3 w-full h-12 md:h-14 rounded-full grid place-items-center font-semibold
-            ${result === "Good" ? "bg-lime-400 text-black" : result === "Poor" ? "bg-red-500 text-white" : "bg-zinc-200 text-zinc-600"}`}
+            ${result === "Good" ? "bg-lime-400 text-black" : result === "Bad" ? "bg-red-500 text-white" : "bg-zinc-200 text-zinc-600"}`}
           >
             {result ?? "—"}
           </div>
@@ -232,13 +330,24 @@ export default function MeasurementDetailPage() {
   );
 }
 
-/** Kapsul nilai abu-abu dengan unit di kanan */
+/** Kapsul nilai abu-abu dengan unit di kanan (untuk Turbidity) */
 function CapsuleValue({ value, unit, placeholder = "—" }: { value: number | null; unit: string; placeholder?: string }) {
   const shown = value === null || Number.isNaN(value) ? placeholder : String(value);
   return (
     <div className="min-w-[180px] h-10 md:h-11 rounded-full bg-zinc-300/70 border border-zinc-200 shadow-inner flex items-center justify-between px-4">
       <span className="text-sm text-zinc-700">{shown}</span>
       <span className="text-sm text-zinc-500">{unit}</span>
+    </div>
+  );
+}
+
+/** Kapsul kecil untuk R/G/B tanpa unit */
+function MiniCapsule({ label, value }: { label: string; value: number | null }) {
+  const shown = value === null || Number.isNaN(value) ? "—" : String(value);
+  return (
+    <div className="h-10 rounded-full bg-zinc-300/70 border border-zinc-200 shadow-inner px-3 flex items-center justify-between">
+      <span className="text-sm text-zinc-700">{label}</span>
+      <span className="text-sm text-zinc-700">{shown}</span>
     </div>
   );
 }

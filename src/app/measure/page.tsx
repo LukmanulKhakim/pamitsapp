@@ -41,20 +41,34 @@ const FALLBACK_THRESHOLDS: CpoThresholds = {
   r_ratio_min: 0.35, // tetap dipakai
 };
 
+/** Bentuk dokumen di Firestore (nilai bisa string/number) */
+type FirestoreThresholdDoc = Partial<{
+  turbidity_min_good_v: number | string;
+  turbidity_max_v: number | string; // legacy key
+  r_ratio_min: number | string;
+}>;
+
 // ===== Fetch thresholds dari Firestore (configs/cpo_thresholds) =====
 async function fetchThresholdsFromFirestore(): Promise<CpoThresholds | null> {
   try {
     const ref = doc(db, "configs", "cpo_thresholds") as DocumentReference<DocumentData>;
     const snap = await getDoc(ref);
     if (snap.exists()) {
-      const d = snap.data() as any;
+      const d = snap.data() as unknown as FirestoreThresholdDoc;
+
+      const toNum = (v: number | string | undefined, fallback: number) => (v === undefined ? fallback : Number(v));
 
       // backward compat: jika dulu ada turbidity_max_v, pakai sebagai min_good
-      const minGood = d.turbidity_min_good_v !== undefined ? Number(d.turbidity_min_good_v) : d.turbidity_max_v !== undefined ? Number(d.turbidity_max_v) : FALLBACK_THRESHOLDS.turbidity_min_good_v;
+      const minGood =
+        d.turbidity_min_good_v !== undefined
+          ? toNum(d.turbidity_min_good_v, FALLBACK_THRESHOLDS.turbidity_min_good_v)
+          : d.turbidity_max_v !== undefined
+          ? toNum(d.turbidity_max_v, FALLBACK_THRESHOLDS.turbidity_min_good_v)
+          : FALLBACK_THRESHOLDS.turbidity_min_good_v;
 
       return {
         turbidity_min_good_v: minGood,
-        r_ratio_min: Number(d.r_ratio_min ?? FALLBACK_THRESHOLDS.r_ratio_min),
+        r_ratio_min: toNum(d.r_ratio_min, FALLBACK_THRESHOLDS.r_ratio_min),
       };
     }
   } catch {
@@ -112,7 +126,6 @@ export default function MeasurementDetailPage() {
 
   // simpan info tambahan untuk audit (opsional)
   const [usedThresholds, setUsedThresholds] = useState<CpoThresholds | null>(null);
-  const [lastRRatio, setLastRRatio] = useState<number | null>(null);
 
   /** Sinkronkan tampilan angka dengan data live dari MQTT */
   useEffect(() => {
@@ -156,13 +169,12 @@ export default function MeasurementDetailPage() {
       setUsedThresholds(t);
 
       // Klasifikasi sederhana
-      const { label, r_ratio } = classifyCPO({ R, G, B, Turbidity }, t);
-      setLastRRatio(r_ratio);
+      const { label } = classifyCPO({ R, G, B, Turbidity }, t);
 
       setAnalyzed(true);
       setResult(label);
       setAskSave(true);
-    } catch (e) {
+    } catch (e: unknown) {
       console.error("analyze error:", e);
     } finally {
       setProcessing(false);
@@ -233,7 +245,7 @@ export default function MeasurementDetailPage() {
 
       await addDoc(collection(db, "measurments"), payload);
       await stopAndBack("saved");
-    } catch (e) {
+    } catch (e: unknown) {
       console.error("save measurment error:", e);
       await stopAndBack("error");
     }

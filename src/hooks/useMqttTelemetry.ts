@@ -11,17 +11,28 @@ export type Telemetry = {
   ts?: number;
 } | null;
 
+/** Tipe minimal klien MQTT yang kita butuhkan */
+type MqttLike = {
+  subscribe(topic: string, opts: { qos: 0 | 1 | 2 }, cb?: (err?: unknown) => void): void;
+  unsubscribe(topic: string, cb?: (err?: unknown) => void): void;
+  on(event: "message", cb: (topic: string, payload: Uint8Array) => void): void;
+  /** opsional: tidak semua client punya .off */
+  off?: (event: "message", cb: (topic: string, payload: Uint8Array) => void) => void;
+};
+
 export default function useMqttTelemetry(deviceId?: string | null) {
   const [data, setData] = useState<Telemetry>(null);
 
   useEffect(() => {
     if (!deviceId) return;
+
     let mounted = true;
-    let clientRef: any;
+    let clientRef: MqttLike | null = null;
     let topicRef = "";
+    let handlerRef: ((topic: string, buf: Uint8Array) => void) | null = null;
 
     (async () => {
-      const client = await getMqttClient();
+      const client = (await getMqttClient()) as unknown as MqttLike;
       clientRef = client;
 
       const t = topics.telemetry(deviceId);
@@ -29,14 +40,16 @@ export default function useMqttTelemetry(deviceId?: string | null) {
 
       client.subscribe(t, { qos: 0 }, (err) => err && console.error("[MQTT] sub telemetry err:", err));
 
-      const handler = (topic: string, buf: Uint8Array) => {
+      handlerRef = (topic: string, buf: Uint8Array) => {
         if (!mounted || topic !== t) return;
         try {
           const s = new TextDecoder().decode(buf);
-          const j = JSON.parse(s);
+          const raw = JSON.parse(s) as unknown;
+          const j = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
 
+          const toNum = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
           // Terima casing fleksibel: moisture/Moisture, dst.
-          const val = (k1: string, k2: string) => (typeof j[k1] === "number" ? j[k1] : typeof j[k2] === "number" ? j[k2] : undefined);
+          const val = (k1: string, k2: string) => toNum(j[k1]) ?? toNum(j[k2]);
 
           setData({
             Moisture: val("moisture", "Moisture"),
@@ -44,38 +57,23 @@ export default function useMqttTelemetry(deviceId?: string | null) {
             R: val("r", "R"),
             G: val("g", "G"),
             B: val("b", "B"),
-            ts: typeof j.ts === "number" ? j.ts : Date.now(),
+            ts: toNum(j["ts"]) ?? Date.now(),
           });
         } catch {
-          // ignore broken payload
+          // abaikan payload yang tidak valid
         }
       };
 
-      client.on("message", handler);
-
-      // cleanup: lepas listener & unsubscribe topic
-      const cleanup = () => {
-        try {
-          client.off?.("message", handler);
-          client.unsubscribe?.(t);
-        } catch {
-          /* no-op */
-        }
-      };
-
-      // simpan ke ref untuk dipakai di return cleanup
-      (useMqttTelemetry as any)._cleanup = cleanup;
+      client.on("message", handlerRef);
     })();
 
     return () => {
       mounted = false;
       try {
-        const cleanup = (useMqttTelemetry as any)._cleanup as (() => void) | undefined;
-        cleanup?.();
-        // fallback jika _cleanup tidak terpasang
         if (clientRef && topicRef) {
-          clientRef.off?.("message");
-          clientRef.unsubscribe?.(topicRef);
+          // lepas listener jika .off tersedia
+          if (clientRef.off && handlerRef) clientRef.off("message", handlerRef);
+          clientRef.unsubscribe(topicRef);
         }
       } catch {
         /* no-op */
